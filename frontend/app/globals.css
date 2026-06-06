@@ -1,0 +1,32 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+.ql-container {
+  font-size: 16px !important;
+  line-height: 1.6 !important;
+}
+
+.ql-editor {
+  min-height: 100% !important;
+  padding: 2rem !important;
+  font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif !important;
+}
+
+.ql-toolbar {
+  border: none !important;
+  background: rgba(255, 255, 255, 0.95) !important;
+  backdrop-filter: blur(20px) !important;
+  border-radius: 16px !important;
+  margin: 1rem !important;
+  box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.25) !important;
+}
+
+.ql-toolbar .ql-picker-label {
+  border: 2px solid rgba(0, 0, 0, 0.1) !important;
+  border-radius: 8px !important;
+}
+
+.ql-snow .ql-picker.ql-expanded .ql-picker-label {
+  border-color: #3B82F6 !important;
+}
