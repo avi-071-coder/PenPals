@@ -58,6 +58,15 @@ const Editor = ({ roomId, initialUsername, initialColor, initialTheme, forcedRea
   const [isRoomLocked, setIsRoomLocked] = useState(false);
   const [blockedUsers, setBlockedUsers] = useState([]);
   const [isPersonallyBlocked, setIsPersonallyBlocked] = useState(false);
+
+  // Advanced Owner & Moderation flow states
+  const [pendingRequests, setPendingRequests] = useState([]);
+  const [mutedUsers, setMutedUsers] = useState([]);
+  const [isPersonallyMuted, setIsPersonallyMuted] = useState(false);
+  const [isChatLockedGlobally, setIsChatLockedGlobally] = useState(false);
+  const [approvalStatus, setApprovalStatus] = useState('pending'); // 'pending' | 'approved' | 'denied' | 'kicked'
+  const [drawerWidth, setDrawerWidth] = useState(320);
+  const [isResizing, setIsResizing] = useState(false);
   
   // Sidebars
   const [chatOpen, setChatOpen] = useState(false);
@@ -224,7 +233,9 @@ const Editor = ({ roomId, initialUsername, initialColor, initialTheme, forcedRea
     try {
       await loadScript('https://cdnjs.cloudflare.com/ajax/libs/html2pdf.js/0.10.1/html2pdf.bundle.min.js');
       
-      const element = quill.root;
+      // Temporarily add print class to quill root (forces high-contrast styles for html2canvas capture)
+      quill.root.classList.add('ql-pdf-export-mode');
+
       const opt = {
         margin: 0.5,
         filename: `penpals-document-${roomId}.pdf`,
@@ -233,7 +244,7 @@ const Editor = ({ roomId, initialUsername, initialColor, initialTheme, forcedRea
         jsPDF: { unit: 'in', format: 'letter', orientation: 'portrait' }
       };
 
-      const pdfWorker = window.html2pdf().from(element).set(opt);
+      const pdfWorker = window.html2pdf().from(quill.root).set(opt);
       
       if (window.showSaveFilePicker) {
         try {
@@ -259,6 +270,8 @@ const Editor = ({ roomId, initialUsername, initialColor, initialTheme, forcedRea
       console.error(err);
       toast.error('Failed to export PDF.');
     } finally {
+      // Always remove the print class to restore the normal theme appearance
+      quill.root.classList.remove('ql-pdf-export-mode');
       setSaveStatus('Saved');
     }
   };
@@ -513,6 +526,14 @@ const Editor = ({ roomId, initialUsername, initialColor, initialTheme, forcedRea
   const sendChatMessage = (e) => {
     e.preventDefault();
     if (!chatInput.trim() || !socketRef.current) return;
+    if (isChatLockedGlobally && !isOwner) {
+      toast.error("Chat is locked by the owner");
+      return;
+    }
+    if (isPersonallyMuted) {
+      toast.error("You are muted and cannot send chat messages");
+      return;
+    }
     socketRef.current.emit('send-chat-message', chatInput.trim());
     setChatInput('');
   };
@@ -528,6 +549,37 @@ const Editor = ({ roomId, initialUsername, initialColor, initialTheme, forcedRea
       targetSocketId,
       blockStatus: !currentBlockStatus
     });
+  };
+
+  const toggleChatMute = (targetSocketId, currentMuteStatus) => {
+    if (!socketRef.current || !isOwner) return;
+    socketRef.current.emit('toggle-chat-mute', { 
+      targetSocketId, 
+      muteStatus: !currentMuteStatus 
+    });
+  };
+
+  const toggleGlobalChatLock = () => {
+    if (!socketRef.current || !isOwner) return;
+    socketRef.current.emit('toggle-global-chat-lock', !isChatLockedGlobally);
+  };
+
+  const kickUser = (targetSocketId) => {
+    if (!socketRef.current || !isOwner) return;
+    socketRef.current.emit('kick-user', targetSocketId);
+    toast.success('User kicked successfully');
+  };
+
+  const handleAdmit = (targetSocketId) => {
+    if (!socketRef.current) return;
+    socketRef.current.emit('admit-user', targetSocketId);
+    setPendingRequests(prev => prev.filter(r => r.socketId !== targetSocketId));
+  };
+
+  const handleDeny = (targetSocketId) => {
+    if (!socketRef.current) return;
+    socketRef.current.emit('deny-user', targetSocketId);
+    setPendingRequests(prev => prev.filter(r => r.socketId !== targetSocketId));
   };
 
   const copyShareLink = () => {
@@ -747,20 +799,87 @@ const Editor = ({ roomId, initialUsername, initialColor, initialTheme, forcedRea
     }
   };
 
+  const handleMouseDown = (e) => {
+    e.preventDefault();
+    setIsResizing(true);
+  };
+
+  useEffect(() => {
+    const handleMouseMove = (e) => {
+      if (!isResizing) return;
+      const newWidth = window.innerWidth - e.clientX;
+      if (newWidth >= 250 && newWidth <= 800) {
+        setDrawerWidth(newWidth);
+      }
+    };
+
+    const handleMouseUp = () => {
+      setIsResizing(false);
+    };
+
+    if (isResizing) {
+      document.addEventListener('mousemove', handleMouseMove);
+      document.addEventListener('mouseup', handleMouseUp);
+    }
+
+    return () => {
+      document.removeEventListener('mousemove', handleMouseMove);
+      document.removeEventListener('mouseup', handleMouseUp);
+    };
+  }, [isResizing]);
+
+  // 1. Socket Connection and Moderation Management Effect
   useEffect(() => {
     if (!roomId) return;
 
-    // Initialize Socket.io
-    socketRef.current = io('http://localhost:4000');
-    
-    socketRef.current.emit('join-room', {
+    const backendUrl = process.env.NEXT_PUBLIC_WS_URL || 'http://localhost:4000';
+    socketRef.current = io(backendUrl);
+
+    // Emit request-join first
+    socketRef.current.emit('request-join', {
       roomId,
       username: initialUsername,
       color: initialColor
     });
 
+    socketRef.current.on('join-approved', ({ roomId, username, color }) => {
+      setApprovalStatus('approved');
+      socketRef.current.emit('join-room', { roomId, username, color });
+    });
+
+    socketRef.current.on('join-denied', () => {
+      setApprovalStatus('denied');
+    });
+
+    socketRef.current.on('kicked', () => {
+      setApprovalStatus('kicked');
+      toast.error('You have been kicked out of the room by the owner');
+    });
+
+    socketRef.current.on('join-request', (request) => {
+      setPendingRequests(prev => {
+        if (prev.some(r => r.socketId === request.socketId)) return prev;
+        return [...prev, request];
+      });
+
+      toast((t) => (
+        <span 
+          className="cursor-pointer font-medium hover:underline text-indigo-400"
+          onClick={() => {
+            toast.dismiss(t.id);
+            setCollaboratorsOpen(true);
+            setChatOpen(false);
+            setHistoryOpen(false);
+          }}
+        >
+          👋 Join Request from {request.userId}. Click to view.
+        </span>
+      ), { id: `request-${request.socketId}`, duration: 6000 });
+    });
+
     socketRef.current.on('room-users', (usersList) => {
       setUsers(usersList);
+      setPendingRequests(prev => prev.filter(r => usersList.some(u => u.socketId === r.socketId) || socketRef.current?.id === r.socketId));
     });
 
     socketRef.current.on('room-chat-history', (history) => {
@@ -769,9 +888,7 @@ const Editor = ({ roomId, initialUsername, initialColor, initialTheme, forcedRea
 
     socketRef.current.on('chat-message', (msg) => {
       setChatMessages(prev => [...prev, msg]);
-      if (chatOpen) {
-        chatEndRef.current?.scrollIntoView({ behavior: 'smooth' });
-      }
+      chatEndRef.current?.scrollIntoView({ behavior: 'smooth' });
     });
 
     socketRef.current.on('readonly-state', (lockedState) => {
@@ -793,9 +910,22 @@ const Editor = ({ roomId, initialUsername, initialColor, initialTheme, forcedRea
       }
     });
 
+    socketRef.current.on('muted-chat-list', (mutedList) => {
+      setMutedUsers(mutedList);
+      const myId = socketRef.current?.id;
+      if (myId && mutedList.includes(myId)) {
+        setIsPersonallyMuted(true);
+      } else {
+        setIsPersonallyMuted(false);
+      }
+    });
+
+    socketRef.current.on('chat-lock-state', (isLocked) => {
+      setIsChatLockedGlobally(isLocked);
+    });
+
     socketRef.current.on('owner-status', (status) => {
       setIsOwner(status);
-      // Suppress owner toast alert
     });
 
     socketRef.current.on('user-joined', (user) => {
@@ -810,6 +940,7 @@ const Editor = ({ roomId, initialUsername, initialColor, initialTheme, forcedRea
       toast(`${user.userId || 'A collaborator'} left the room`);
       setUsers(prev => prev.filter(u => u.socketId !== user.socketId));
       setCursors(prev => prev.filter(c => c.socketId !== user.socketId));
+      setPendingRequests(prev => prev.filter(r => r.socketId !== user.socketId));
     });
 
     socketRef.current.on('cursor-moved', (cursorData) => {
@@ -818,6 +949,15 @@ const Editor = ({ roomId, initialUsername, initialColor, initialTheme, forcedRea
         return [...updated, { socketId: cursorData.socketId, ...cursorData }];
       });
     });
+
+    return () => {
+      socketRef.current?.disconnect();
+    };
+  }, [roomId, initialUsername, initialColor]);
+
+  // 2. Quill Editor and Yjs Setup Effect (Executes only when approved)
+  useEffect(() => {
+    if (approvalStatus !== 'approved' || !roomId) return;
 
     // Initialize Yjs
     initYjsResultRef.current = initYjs(roomId, quillRef);
@@ -902,7 +1042,6 @@ const Editor = ({ roomId, initialUsername, initialColor, initialTheme, forcedRea
 
     // Keyboard capture for Slash commands and shortcuts
     const handleKeyDown = (e) => {
-      // Ctrl + S / Cmd + S for manual saves
       if ((e.ctrlKey || e.metaKey) && e.key === 's') {
         e.preventDefault();
         saveNamedVersionRef.current?.();
@@ -933,14 +1072,13 @@ const Editor = ({ roomId, initialUsername, initialColor, initialTheme, forcedRea
     quill.root.addEventListener('keydown', handleKeyDown, true);
 
     return () => {
-      socketRef.current?.disconnect();
       destroyYjs();
       if (quill) {
         quill.root.removeEventListener('keydown', handleKeyDown, true);
         quill.root.removeEventListener('click', handleEditorClick);
       }
     };
-  }, [roomId, initialUsername, initialColor, forcedReadOnly, chatOpen, triggerSaveStatus, updateFormattingInspector, handleCursorMove, applyCommand, closeSlashMenu, fetchVersions]);
+  }, [roomId, approvalStatus, triggerSaveStatus, updateFormattingInspector, handleCursorMove, applyCommand, closeSlashMenu, fetchVersions]);
 
   // Handle beforeunload to warn users about leaving
   useEffect(() => {
@@ -983,6 +1121,75 @@ const Editor = ({ roomId, initialUsername, initialColor, initialTheme, forcedRea
     }
   }), []);
 
+  if (approvalStatus === 'pending') {
+    return (
+      <div className="h-screen w-screen flex flex-col items-center justify-center bg-[#121212] text-white p-6 font-sans">
+        <div className="max-w-md w-full p-8 rounded-2xl bg-white/5 border border-white/10 backdrop-blur-md shadow-2xl flex flex-col items-center text-center space-y-6">
+          <div className="w-16 h-16 rounded-full bg-indigo-500/10 flex items-center justify-center text-indigo-400 text-3xl animate-pulse">
+            ⏳
+          </div>
+          <div className="space-y-2">
+            <h2 className="text-xl font-bold tracking-tight">Waiting for Owner Approval...</h2>
+            <p className="text-sm opacity-60">Your request to join this document has been sent. Please wait for the room owner to admit you.</p>
+          </div>
+          <div className="w-full h-1 bg-white/10 rounded-full overflow-hidden">
+            <div className="h-full bg-indigo-500 animate-[loading_1.5s_infinite]" style={{ width: '40%' }}></div>
+          </div>
+          <button
+            onClick={() => window.location.reload()}
+            className="px-5 py-2.5 rounded-lg text-xs font-bold bg-zinc-800 hover:bg-zinc-700 transition-all border border-zinc-700 text-zinc-300"
+          >
+            Retry / Reload
+          </button>
+        </div>
+      </div>
+    );
+  }
+
+  if (approvalStatus === 'denied') {
+    return (
+      <div className="h-screen w-screen flex flex-col items-center justify-center bg-[#121212] text-white p-6 font-sans">
+        <div className="max-w-md w-full p-8 rounded-2xl bg-white/5 border border-white/10 backdrop-blur-md shadow-2xl flex flex-col items-center text-center space-y-6">
+          <div className="w-16 h-16 rounded-full bg-rose-500/10 flex items-center justify-center text-rose-400 text-3xl">
+            🚫
+          </div>
+          <div className="space-y-2">
+            <h2 className="text-xl font-bold tracking-tight text-rose-400">Access Denied</h2>
+            <p className="text-sm opacity-60">The owner of this room declined your request to join.</p>
+          </div>
+          <button
+            onClick={() => window.location.href = '/'}
+            className="w-full py-2.5 rounded-lg text-xs font-bold bg-zinc-800 hover:bg-zinc-700 transition-all border border-zinc-700 text-zinc-300"
+          >
+            Go Back Home
+          </button>
+        </div>
+      </div>
+    );
+  }
+
+  if (approvalStatus === 'kicked') {
+    return (
+      <div className="h-screen w-screen flex flex-col items-center justify-center bg-[#121212] text-white p-6 font-sans">
+        <div className="max-w-md w-full p-8 rounded-2xl bg-white/5 border border-white/10 backdrop-blur-md shadow-2xl flex flex-col items-center text-center space-y-6">
+          <div className="w-16 h-16 rounded-full bg-amber-500/10 flex items-center justify-center text-amber-400 text-3xl">
+            👞
+          </div>
+          <div className="space-y-2">
+            <h2 className="text-xl font-bold tracking-tight text-amber-400">Kicked Out</h2>
+            <p className="text-sm opacity-60">You have been kicked out of the room by the owner.</p>
+          </div>
+          <button
+            onClick={() => window.location.href = '/'}
+            className="w-full py-2.5 rounded-lg text-xs font-bold bg-zinc-800 hover:bg-zinc-700 transition-all border border-zinc-700 text-zinc-300"
+          >
+            Go Back Home
+          </button>
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div className={`h-screen flex flex-col transition-all duration-300 ${theme.bg}`}>
       
@@ -1009,6 +1216,14 @@ const Editor = ({ roomId, initialUsername, initialColor, initialTheme, forcedRea
           position: relative !important;
           z-index: 10 !important;
           border: none !important;
+          flex: 1 !important;
+          overflow-y: auto !important;
+        }
+        .quill {
+          display: flex !important;
+          flex-direction: column !important;
+          height: 100% !important;
+          overflow: hidden !important;
         }
         
         .ql-snow .ql-stroke {
@@ -1157,6 +1372,82 @@ const Editor = ({ roomId, initialUsername, initialColor, initialTheme, forcedRea
         .ql-snow .ql-picker.ql-size .ql-picker-item[data-value="32px"]::before {
           content: '32px' !important;
         }
+
+        /* Active / Hover Toolbar Highlights */
+        .ql-snow.ql-toolbar button.ql-active .ql-stroke,
+        .ql-snow .ql-toolbar button.ql-active .ql-stroke,
+        .ql-snow.ql-toolbar button:hover .ql-stroke,
+        .ql-snow .ql-toolbar button:hover .ql-stroke {
+          stroke: ${currentTheme === 'spotify' ? '#1db954' : currentTheme === 'netflix' ? '#e50914' : currentTheme === 'cyberpunk' ? '#ec4899' : currentTheme === 'sunset' ? '#f97316' : currentTheme === 'sepia' ? '#b45309' : '#818cf8'} !important;
+          stroke-width: 2.5px !important;
+        }
+        .ql-snow.ql-toolbar button.ql-active .ql-fill,
+        .ql-snow .ql-toolbar button.ql-active .ql-fill,
+        .ql-snow.ql-toolbar button:hover .ql-fill,
+        .ql-snow .ql-toolbar button:hover .ql-fill {
+          fill: ${currentTheme === 'spotify' ? '#1db954' : currentTheme === 'netflix' ? '#e50914' : currentTheme === 'cyberpunk' ? '#ec4899' : currentTheme === 'sunset' ? '#f97316' : currentTheme === 'sepia' ? '#b45309' : '#818cf8'} !important;
+        }
+        .ql-snow.ql-toolbar button.ql-active,
+        .ql-snow .ql-toolbar button.ql-active {
+          background-color: ${currentTheme === 'sepia' ? 'rgba(69,26,3,0.1)' : 'rgba(255,255,255,0.15)'} !important;
+          border-radius: 6px !important;
+        }
+        .ql-snow.ql-toolbar button:hover,
+        .ql-snow .ql-toolbar button:hover {
+          background-color: ${currentTheme === 'sepia' ? 'rgba(69,26,3,0.05)' : 'rgba(255,255,255,0.1)'} !important;
+          border-radius: 6px !important;
+        }
+        .ql-snow .ql-picker.ql-expanded .ql-picker-label .ql-stroke {
+          stroke: ${currentTheme === 'spotify' ? '#1db954' : currentTheme === 'netflix' ? '#e50914' : currentTheme === 'cyberpunk' ? '#ec4899' : currentTheme === 'sunset' ? '#f97316' : currentTheme === 'sepia' ? '#b45309' : '#818cf8'} !important;
+        }
+        .ql-snow .ql-picker.ql-expanded .ql-picker-label {
+          color: ${currentTheme === 'spotify' ? '#1db954' : currentTheme === 'netflix' ? '#e50914' : currentTheme === 'cyberpunk' ? '#ec4899' : currentTheme === 'sunset' ? '#f97316' : currentTheme === 'sepia' ? '#b45309' : '#818cf8'} !important;
+        }
+
+        /* PDF Export Styles (Forces always white background, black text, and blue links) */
+        .ql-editor.ql-pdf-export-mode {
+          background-color: #ffffff !important;
+          color: #111827 !important;
+          padding: 40px !important;
+          font-family: 'Inter', 'Helvetica Neue', Helvetica, Arial, sans-serif !important;
+          line-height: 1.6 !important;
+          font-size: 15px !important;
+        }
+        .ql-editor.ql-pdf-export-mode * {
+          color: #111827 !important;
+          background-color: transparent !important;
+          background: transparent !important;
+        }
+        .ql-editor.ql-pdf-export-mode a,
+        .ql-editor.ql-pdf-export-mode a * {
+          color: #2563eb !important;
+          text-decoration: underline !important;
+        }
+        .ql-editor.ql-pdf-export-mode pre,
+        .ql-editor.ql-pdf-export-mode pre * {
+          background-color: #f3f4f6 !important;
+          background: #f3f4f6 !important;
+          color: #1f2937 !important;
+          font-family: monospace !important;
+        }
+        .ql-editor.ql-pdf-export-mode blockquote,
+        .ql-editor.ql-pdf-export-mode blockquote * {
+          border-left: 4px solid #e5e7eb !important;
+          color: #4b5563 !important;
+          font-style: italic !important;
+        }
+        .ql-editor.ql-pdf-export-mode p {
+          margin-bottom: 8px !important;
+        }
+        .ql-editor.ql-pdf-export-mode h1, .ql-editor.ql-pdf-export-mode h2, .ql-editor.ql-pdf-export-mode h3 {
+          font-weight: bold !important;
+          color: #111827 !important;
+          margin-top: 16px !important;
+          margin-bottom: 8px !important;
+        }
+        .ql-editor.ql-pdf-export-mode h1 { font-size: 2em !important; }
+        .ql-editor.ql-pdf-export-mode h2 { font-size: 1.5em !important; }
+        .ql-editor.ql-pdf-export-mode h3 { font-size: 1.17em !important; }
       `}</style>
 
       {/* Header */}
@@ -1289,10 +1580,10 @@ const Editor = ({ roomId, initialUsername, initialColor, initialTheme, forcedRea
       )}
 
       {/* Main Workspace */}
-      <div className="flex-1 flex flex-col overflow-hidden relative">
+      <div className="flex-1 flex flex-row overflow-hidden relative">
         
         {/* Editor Area */}
-        <div className="flex-1 flex flex-col p-4 md:p-6 overflow-hidden max-w-7xl mx-auto w-full relative">
+        <div className="flex-1 flex flex-col p-4 md:p-6 overflow-hidden relative">
           <div className={`flex-1 flex flex-col rounded-xl overflow-hidden shadow-2xl relative transition-all duration-300 ${theme.editorCard}`}>
             
             <ReactQuill
@@ -1300,7 +1591,7 @@ const Editor = ({ roomId, initialUsername, initialColor, initialTheme, forcedRea
               theme="snow"
               modules={modules}
               readOnly={isReadOnly}
-              className="flex-1 overflow-y-auto"
+              className="flex-1 overflow-hidden"
               placeholder="Start typing collaborative document... (Type '/' for formatting shortcuts)"
             />
 
@@ -1440,264 +1731,347 @@ const Editor = ({ roomId, initialUsername, initialColor, initialTheme, forcedRea
           </div>
         </div>
 
-        {/* Sidebar chat drawer */}
-        <AnimatePresence>
-          {chatOpen && (
-            <motion.div
-              initial={{ x: 350, opacity: 0 }}
-              animate={{ x: 0, opacity: 1 }}
-              exit={{ x: 350, opacity: 0 }}
-              transition={{ type: 'spring', damping: 25, stiffness: 200 }}
-              className={`w-80 h-full border-l flex flex-col overflow-hidden z-20 absolute right-0 top-0 ${theme.panel}`}
-            >
-              <div className="p-4 border-b border-white/10 flex items-center justify-between">
-                <h3 className="font-bold text-sm">💬 Room Chat</h3>
-                <button onClick={() => setChatOpen(false)} className="text-xs opacity-50 hover:opacity-100">✕</button>
-              </div>
+        {/* Unified Resizable Drawers */}
+        {(chatOpen || historyOpen || collaboratorsOpen) && (
+          <div 
+            onMouseDown={handleMouseDown}
+            className="w-1 bg-white/10 hover:bg-indigo-500 cursor-col-resize transition-all self-stretch flex-shrink-0 relative z-30 group"
+          >
+            <div className="absolute inset-y-0 -left-1 -right-1 cursor-col-resize" />
+          </div>
+        )}
 
-              <div className="flex-1 overflow-y-auto p-4 space-y-4">
-                {chatMessages.length === 0 ? (
-                  <div className="h-full flex items-center justify-center text-xs opacity-50 italic">
-                    No messages in this room yet.
-                  </div>
-                ) : (
-                  chatMessages.map((msg, index) => (
-                    <div key={index} className="text-xs space-y-1">
-                      <div className="flex items-center gap-1.5">
-                        <span 
-                          className="font-bold px-1.5 py-0.5 rounded text-[9px] text-white"
-                          style={{ backgroundColor: msg.color }}
+        <AnimatePresence>
+          {(chatOpen || historyOpen || collaboratorsOpen) && (
+            <motion.div
+              initial={{ width: 0, opacity: 0 }}
+              animate={{ width: drawerWidth, opacity: 1 }}
+              exit={{ width: 0, opacity: 0 }}
+              transition={{ type: 'spring', damping: 25, stiffness: 200 }}
+              className={`h-full border-l flex flex-col overflow-hidden z-20 relative flex-shrink-0 ${theme.panel}`}
+              style={{ width: drawerWidth }}
+            >
+              {chatOpen && (
+                <div className="flex flex-col h-full w-full">
+                  <div className="p-4 border-b border-white/10 flex items-center justify-between">
+                    <h3 className="font-bold text-sm">💬 Room Chat</h3>
+                    <div className="flex items-center gap-2">
+                      {isOwner && (
+                        <button
+                          onClick={toggleGlobalChatLock}
+                          className="px-2 py-1 text-[10px] font-bold rounded bg-zinc-800 hover:bg-zinc-700 text-zinc-300 border border-zinc-700 transition-all"
+                          title={isChatLockedGlobally ? "Unlock Chat for Everyone" : "Lock Chat Globally"}
                         >
-                          {msg.userId}
-                        </span>
-                        <span className="opacity-40 text-[9px]">
-                          {new Date(msg.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
-                        </span>
-                      </div>
-                      <div className="bg-white/5 p-2 rounded-lg break-words leading-relaxed border border-white/5">
-                        {msg.message}
-                      </div>
+                          {isChatLockedGlobally ? "🔓 Unlock Chat" : "🔒 Lock Chat"}
+                        </button>
+                      )}
+                      <button onClick={() => setChatOpen(false)} className="text-xs opacity-50 hover:opacity-100 px-1">✕</button>
                     </div>
-                  ))
-                )}
-                <div ref={chatEndRef} />
-              </div>
+                  </div>
 
-              <form onSubmit={sendChatMessage} className="p-3 border-t border-white/10 flex gap-2">
-                <input
-                  type="text"
-                  value={chatInput}
-                  onChange={(e) => setChatInput(e.target.value)}
-                  placeholder="Type message..."
-                  className="flex-1 px-3 py-2 text-xs bg-black/40 border border-white/10 rounded-lg focus:outline-none focus:ring-1 focus:ring-white/40 text-white"
-                />
-                <button 
-                  type="submit"
-                  className={`px-3 py-2 rounded-lg text-xs font-bold ${theme.buttonPrimary}`}
-                >
-                  Send
-                </button>
-              </form>
-            </motion.div>
-          )}
-        </AnimatePresence>
-
-        {/* Sidebar version history drawer */}
-        <AnimatePresence>
-          {historyOpen && (
-            <motion.div
-              initial={{ x: 350, opacity: 0 }}
-              animate={{ x: 0, opacity: 1 }}
-              exit={{ x: 350, opacity: 0 }}
-              transition={{ type: 'spring', damping: 25, stiffness: 200 }}
-              className={`w-80 h-full border-l flex flex-col overflow-hidden z-20 absolute right-0 top-0 ${theme.panel}`}
-            >
-              <div className="p-4 border-b border-white/10 flex items-center justify-between">
-                <h3 className="font-bold text-sm">⏳ Version history</h3>
-                <button onClick={() => setHistoryOpen(false)} className="text-xs opacity-50 hover:opacity-100">✕</button>
-              </div>
-
-              <div className="p-4 border-b border-white/10 space-y-3">
-                <label className="text-xs font-semibold block opacity-75">Create snapshot</label>
-                <div className="flex gap-2">
-                  <input
-                    type="text"
-                    value={versionNameInput}
-                    onChange={(e) => setVersionNameInput(e.target.value)}
-                    placeholder="E.g. Draft 1..."
-                    className="flex-1 px-3 py-2 text-xs bg-black/40 border border-white/10 rounded-lg focus:outline-none focus:ring-1 focus:ring-white/40 text-white"
-                  />
-                  <button
-                    onClick={saveVersion}
-                    className={`px-3 py-2 rounded-lg text-xs font-bold ${theme.buttonPrimary}`}
-                  >
-                    Save
-                  </button>
-                </div>
-              </div>
-
-              <div className="flex-1 overflow-y-auto p-4 space-y-3">
-                <label className="text-xs font-semibold block opacity-75 mb-1">Saved backups</label>
-                {versionHistoryList.length === 0 ? (
-                  <div className="text-xs opacity-50 italic pt-2">No backups saved yet.</div>
-                ) : (
-                  versionHistoryList.map((ver) => {
-                    const isVerId = ver._id || new Date(ver.timestamp).getTime().toString();
-                    const isEditing = editingVersionId === isVerId;
-
-                    return (
-                      <div 
-                        key={isVerId} 
-                        className="p-3 bg-white/5 border border-white/5 hover:border-white/20 rounded-xl flex flex-col gap-2 transition-all"
-                      >
-                        {isEditing ? (
-                          <div className="space-y-2">
-                            <input
-                              type="text"
-                              value={editingVersionName}
-                              onChange={(e) => setEditingVersionName(e.target.value)}
-                              className="w-full px-2.5 py-1.5 text-xs bg-black/40 border border-white/25 rounded-md focus:outline-none focus:ring-1 focus:ring-indigo-500 text-white font-medium"
-                              placeholder="New backup name..."
-                            />
-                            <div className="flex gap-1.5 justify-end">
-                              <button
-                                onClick={() => renameVersion(ver)}
-                                className="px-2.5 py-1 text-[10px] font-bold bg-indigo-600 hover:bg-indigo-700 text-white rounded transition-all"
-                                title="Save name change"
-                              >
-                                Save
-                              </button>
-                              <button
-                                onClick={() => setEditingVersionId(null)}
-                                className="px-2.5 py-1 text-[10px] font-bold bg-zinc-800 hover:bg-zinc-700 text-zinc-300 rounded transition-all"
-                                title="Cancel"
-                              >
-                                Cancel
-                              </button>
-                            </div>
-                          </div>
-                        ) : (
-                          <>
-                            <div className="flex flex-col">
-                              <span className="font-semibold text-xs truncate">{ver.name}</span>
-                              <span className="text-[10px] opacity-50">
-                                {new Date(ver.timestamp).toLocaleString()}
-                              </span>
-                            </div>
-                            <div className="flex gap-1.5">
-                              <button
-                                onClick={() => restoreVersion(ver)}
-                                className={`flex-1 py-1.5 text-[10px] font-bold rounded ${theme.buttonSecondary}`}
-                              >
-                                Restore
-                              </button>
-                              <button
-                                onClick={() => {
-                                  setEditingVersionId(isVerId);
-                                  setEditingVersionName(ver.name);
-                                }}
-                                className={`px-2 py-1.5 text-[10px] font-bold rounded transition-all ${theme.buttonSecondary}`}
-                                title="Rename snapshot"
-                              >
-                                ✏️
-                              </button>
-                              <button
-                                onClick={() => deleteVersion(ver)}
-                                className="px-2 py-1.5 text-[10px] font-bold bg-rose-950/50 hover:bg-rose-900/80 border border-rose-500/30 text-rose-300 rounded transition-all"
-                                title="Delete this snapshot"
-                              >
-                                🗑️
-                              </button>
-                            </div>
-                          </>
-                        )}
+                  <div className="flex-1 overflow-y-auto p-4 space-y-4">
+                    {chatMessages.length === 0 ? (
+                      <div className="h-full flex items-center justify-center text-xs opacity-50 italic">
+                        No messages in this room yet.
                       </div>
-                    );
-                  })
-                )}
-              </div>
-            </motion.div>
-          )}
-        </AnimatePresence>
+                    ) : (
+                      chatMessages.map((msg, index) => (
+                        <div key={index} className="text-xs space-y-1">
+                          <div className="flex items-center gap-1.5">
+                            <span 
+                              className="font-bold px-1.5 py-0.5 rounded text-[9px] text-white"
+                              style={{ backgroundColor: msg.color }}
+                            >
+                              {msg.userId}
+                            </span>
+                            <span className="opacity-40 text-[9px]">
+                              {new Date(msg.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+                            </span>
+                          </div>
+                          <div className="bg-white/5 p-2 rounded-lg break-words leading-relaxed border border-white/5">
+                            {msg.message}
+                          </div>
+                        </div>
+                      ))
+                    )}
+                    <div ref={chatEndRef} />
+                  </div>
 
-        {/* Sidebar collaborators drawer */}
-        <AnimatePresence>
-          {collaboratorsOpen && (
-            <motion.div
-              initial={{ x: 350, opacity: 0 }}
-              animate={{ x: 0, opacity: 1 }}
-              exit={{ x: 350, opacity: 0 }}
-              transition={{ type: 'spring', damping: 25, stiffness: 200 }}
-              className={`w-80 h-full border-l flex flex-col overflow-hidden z-20 absolute right-0 top-0 ${theme.panel}`}
-            >
-              <div className="p-4 border-b border-white/10 flex items-center justify-between">
-                <h3 className="font-bold text-sm">👥 Collaborators</h3>
-                <button onClick={() => setCollaboratorsOpen(false)} className="text-xs opacity-50 hover:opacity-100">✕</button>
-              </div>
-
-              {isOwner && (
-                <div className="p-4 border-b border-white/10 space-y-2.5">
-                  <label className="text-[10px] font-extrabold uppercase text-white/50 tracking-wider">Global Action</label>
-                  <button
-                    onClick={toggleReadOnly}
-                    className={`w-full py-2.5 rounded-lg text-xs font-bold transition-all shadow-md ${
-                      isRoomLocked ? 'bg-rose-600 hover:bg-rose-700 text-white' : theme.buttonSecondary
-                    }`}
-                  >
-                    {isRoomLocked ? '🔓 Allow Everyone to Edit' : '🔒 Stop Everyone Editing'}
-                  </button>
+                  <form onSubmit={sendChatMessage} className="p-3 border-t border-white/10 flex gap-2">
+                    <input
+                      type="text"
+                      value={chatInput}
+                      onChange={(e) => setChatInput(e.target.value)}
+                      placeholder={isChatLockedGlobally && !isOwner ? "Chat locked by owner..." : isPersonallyMuted ? "You are muted..." : "Type message..."}
+                      disabled={(isChatLockedGlobally && !isOwner) || isPersonallyMuted}
+                      className="flex-1 px-3 py-2 text-xs bg-black/40 border border-white/10 rounded-lg focus:outline-none focus:ring-1 focus:ring-white/40 text-white disabled:opacity-50"
+                    />
+                    <button 
+                      type="submit"
+                      disabled={(isChatLockedGlobally && !isOwner) || isPersonallyMuted}
+                      className={`px-3 py-2 rounded-lg text-xs font-bold disabled:opacity-50 ${theme.buttonPrimary}`}
+                    >
+                      Send
+                    </button>
+                  </form>
                 </div>
               )}
 
-              <div className="flex-1 overflow-y-auto p-4 space-y-3">
-                <label className="text-[10px] font-extrabold uppercase text-white/50 tracking-wider">Active in Room</label>
-                {users.length === 0 ? (
-                  <div className="text-xs opacity-50 italic">No one else in the room.</div>
-                ) : (
-                  users.map((u) => {
-                    const isSelf = u.socketId === socketRef.current?.id;
-                    const isBlocked = blockedUsers.includes(u.socketId);
-                    
-                    return (
-                      <div 
-                        key={u.socketId}
-                        className="p-3 bg-white/5 border border-white/5 rounded-xl flex flex-col gap-2 transition-all"
+              {historyOpen && (
+                <div className="flex flex-col h-full w-full">
+                  <div className="p-4 border-b border-white/10 flex items-center justify-between">
+                    <h3 className="font-bold text-sm">⏳ Version History</h3>
+                    <button onClick={() => setHistoryOpen(false)} className="text-xs opacity-50 hover:opacity-100">✕</button>
+                  </div>
+
+                  <div className="p-4 border-b border-white/10 space-y-3">
+                    <label className="text-xs font-semibold block opacity-75">Create snapshot</label>
+                    <div className="flex gap-2">
+                      <input
+                        type="text"
+                        value={versionNameInput}
+                        onChange={(e) => setVersionNameInput(e.target.value)}
+                        placeholder="E.g. Draft 1..."
+                        className="flex-1 px-3 py-2 text-xs bg-black/40 border border-white/10 rounded-lg focus:outline-none focus:ring-1 focus:ring-white/40 text-white"
+                      />
+                      <button
+                        onClick={saveVersion}
+                        className={`px-3 py-2 rounded-lg text-xs font-bold ${theme.buttonPrimary}`}
                       >
-                        <div className="flex items-center justify-between gap-2">
-                          <div className="flex items-center gap-2 overflow-hidden">
-                            <span 
-                              className="w-2.5 h-2.5 rounded-full flex-shrink-0"
-                              style={{ backgroundColor: u.color }}
-                            />
-                            <span className="font-semibold text-xs truncate">
-                              {u.userId} {isSelf ? ' (You)' : ''}
-                            </span>
-                          </div>
-                          {isSelf && <span className="text-[9px] bg-indigo-500/20 text-indigo-300 px-1.5 py-0.5 rounded border border-indigo-500/30">You</span>}
-                        </div>
-                        
-                        {/* Block/Unblock toggle */}
-                        {isOwner && !isSelf ? (
-                          <button
-                            onClick={() => toggleUserBlock(u.socketId, isBlocked)}
-                            className={`w-full py-1.5 text-[10px] font-bold rounded transition-all ${
-                              isBlocked 
-                                ? 'bg-rose-600/30 text-rose-300 hover:bg-rose-600/40 border border-rose-500/40' 
-                                : 'bg-emerald-600/20 text-emerald-400 hover:bg-emerald-600/30 border border-emerald-500/35'
-                            }`}
+                        Save
+                      </button>
+                    </div>
+                  </div>
+
+                  <div className="flex-1 overflow-y-auto p-4 space-y-3">
+                    <label className="text-xs font-semibold block opacity-75 mb-1">Saved backups</label>
+                    {versionHistoryList.length === 0 ? (
+                      <div className="text-xs opacity-50 italic pt-2">No backups saved yet.</div>
+                    ) : (
+                      versionHistoryList.map((ver) => {
+                        const isVerId = ver._id || new Date(ver.timestamp).getTime().toString();
+                        const isEditing = editingVersionId === isVerId;
+
+                        return (
+                          <div 
+                            key={isVerId} 
+                            className="p-3 bg-white/5 border border-white/5 hover:border-white/20 rounded-xl flex flex-col gap-2 transition-all"
                           >
-                            {isBlocked ? '🚫 Blocked (Click to Allow)' : '✅ Allowed (Click to Block)'}
-                          </button>
-                        ) : (
-                          <span className="text-[10px] opacity-50 italic">
-                            {isBlocked ? '🚫 Blocked' : '✅ Active'}
-                          </span>
-                        )}
+                            {isEditing ? (
+                              <div className="space-y-2">
+                                <input
+                                  type="text"
+                                  value={editingVersionName}
+                                  onChange={(e) => setEditingVersionName(e.target.value)}
+                                  className="w-full px-2.5 py-1.5 text-xs bg-black/40 border border-white/25 rounded-md focus:outline-none focus:ring-1 focus:ring-indigo-500 text-white font-medium"
+                                  placeholder="New backup name..."
+                                />
+                                <div className="flex gap-1.5 justify-end">
+                                  <button
+                                    onClick={() => renameVersion(ver)}
+                                    className="px-2.5 py-1 text-[10px] font-bold bg-indigo-600 hover:bg-indigo-700 text-white rounded transition-all"
+                                    title="Save name change"
+                                  >
+                                    Save
+                                  </button>
+                                  <button
+                                    onClick={() => setEditingVersionId(null)}
+                                    className="px-2.5 py-1 text-[10px] font-bold bg-zinc-800 hover:bg-zinc-700 text-zinc-300 rounded transition-all"
+                                    title="Cancel"
+                                  >
+                                    Cancel
+                                  </button>
+                                </div>
+                              </div>
+                            ) : (
+                              <>
+                                <div className="flex flex-col">
+                                  <span className="font-semibold text-xs truncate">{ver.name}</span>
+                                  <span className="text-[10px] opacity-50">
+                                    {new Date(ver.timestamp).toLocaleString()}
+                                  </span>
+                                </div>
+                                <div className="flex gap-1.5">
+                                  <button
+                                    onClick={() => restoreVersion(ver)}
+                                    className={`flex-1 py-1.5 text-[10px] font-bold rounded ${theme.buttonSecondary}`}
+                                  >
+                                    Restore
+                                  </button>
+                                  <button
+                                    onClick={() => {
+                                      setEditingVersionId(isVerId);
+                                      setEditingVersionName(ver.name);
+                                    }}
+                                    className={`px-2 py-1.5 text-[10px] font-bold rounded transition-all ${theme.buttonSecondary}`}
+                                    title="Rename snapshot"
+                                  >
+                                    ✏️
+                                  </button>
+                                  <button
+                                    onClick={() => deleteVersion(ver)}
+                                    className="px-2 py-1.5 text-[10px] font-bold bg-rose-950/50 hover:bg-rose-900/80 border border-rose-500/30 text-rose-300 rounded transition-all"
+                                    title="Delete this snapshot"
+                                  >
+                                    🗑️
+                                  </button>
+                                </div>
+                              </>
+                            )}
+                          </div>
+                        );
+                      })
+                    )}
+                  </div>
+                </div>
+              )}
+
+              {collaboratorsOpen && (
+                <div className="flex flex-col h-full w-full">
+                  <div className="p-4 border-b border-white/10 flex items-center justify-between">
+                    <h3 className="font-bold text-sm">👥 Collaborators</h3>
+                    <button onClick={() => setCollaboratorsOpen(false)} className="text-xs opacity-50 hover:opacity-100">✕</button>
+                  </div>
+
+                  {isOwner && (
+                    <div className="p-4 border-b border-white/10 space-y-2.5">
+                      <label className="text-[10px] font-extrabold uppercase text-white/50 tracking-wider">Global Control</label>
+                      <button
+                        onClick={toggleReadOnly}
+                        className={`w-full py-2.5 rounded-lg text-xs font-bold transition-all shadow-md ${
+                          isRoomLocked ? 'bg-rose-600 hover:bg-rose-700 text-white' : theme.buttonSecondary
+                        }`}
+                      >
+                        {isRoomLocked ? '🔓 Allow Everyone to Edit' : '🔒 Stop Everyone Editing'}
+                      </button>
+                    </div>
+                  )}
+
+                  {isOwner && pendingRequests.length > 0 && (
+                    <div className="p-4 border-b border-white/10 bg-indigo-950/20 space-y-3">
+                      <label className="text-[10px] font-extrabold uppercase text-indigo-400 tracking-wider">
+                        👋 Pending Join Requests ({pendingRequests.length})
+                      </label>
+                      <div className="space-y-2">
+                        {pendingRequests.map((req) => (
+                          <div 
+                            key={req.socketId}
+                            className="p-3 bg-indigo-500/10 border border-indigo-500/25 rounded-xl flex items-center justify-between gap-3 text-xs"
+                          >
+                            <div className="overflow-hidden space-y-0.5">
+                              <span className="font-bold truncate block">{req.userId}</span>
+                              <span className="text-[10px] opacity-60">Wants to collaborate</span>
+                            </div>
+                            <div className="flex gap-1.5">
+                              <button
+                                onClick={() => handleAdmit(req.socketId)}
+                                className="px-2.5 py-1.5 rounded-lg text-[10px] font-bold bg-indigo-600 hover:bg-indigo-500 text-white transition-all"
+                                title="Admit Collaborator"
+                              >
+                                Admit
+                              </button>
+                              <button
+                                onClick={() => handleDeny(req.socketId)}
+                                className="px-2.5 py-1.5 rounded-lg text-[10px] font-bold bg-zinc-800 hover:bg-zinc-700 text-zinc-300 border border-zinc-700 transition-all"
+                                title="Deny Access"
+                              >
+                                Deny
+                              </button>
+                            </div>
+                          </div>
+                        ))}
                       </div>
-                    );
-                  })
-                )}
-              </div>
+                    </div>
+                  )}
+
+                  <div className="flex-grow overflow-y-auto p-4 space-y-3">
+                    <label className="text-[10px] font-extrabold uppercase text-white/50 tracking-wider">Active Collaborators</label>
+                    {users.length === 0 ? (
+                      <div className="text-xs opacity-50 italic">No one else in the room.</div>
+                    ) : (
+                      users.map((u) => {
+                        const isSelf = u.socketId === socketRef.current?.id;
+                        const isBlocked = blockedUsers.includes(u.socketId);
+                        const isMuted = mutedUsers.includes(u.socketId);
+
+                        return (
+                          <div 
+                            key={u.socketId}
+                            className="p-3 bg-white/5 border border-white/5 rounded-xl flex flex-col gap-3 transition-all"
+                          >
+                            <div className="flex items-center justify-between gap-2">
+                              <div className="flex items-center gap-2 overflow-hidden">
+                                <span 
+                                  className="w-2.5 h-2.5 rounded-full flex-shrink-0"
+                                  style={{ backgroundColor: u.color }}
+                                />
+                                <span className="font-semibold text-xs truncate">
+                                  {u.userId} {isSelf ? ' (You)' : ''}
+                                </span>
+                              </div>
+                              {isSelf && <span className="text-[9px] bg-indigo-500/20 text-indigo-300 px-1.5 py-0.5 rounded border border-indigo-500/30">You</span>}
+                            </div>
+
+                            {isOwner && !isSelf && (
+                              <div className="grid grid-cols-2 gap-1.5">
+                                <button
+                                  onClick={() => toggleUserBlock(u.socketId, isBlocked)}
+                                  className={`py-1.5 rounded text-[10px] font-bold border transition-all ${
+                                    isBlocked 
+                                      ? 'bg-rose-500/20 text-rose-300 border-rose-500/40 hover:bg-rose-500/30' 
+                                      : 'bg-zinc-800 text-zinc-300 border-zinc-700 hover:bg-zinc-750'
+                                  }`}
+                                  title={isBlocked ? "Unlock editing for this user" : "Block this user from editing"}
+                                >
+                                  {isBlocked ? '🔓 Unblock Edit' : '🔒 Block Edit'}
+                                </button>
+                                <button
+                                  onClick={() => toggleChatMute(u.socketId, isMuted)}
+                                  className={`py-1.5 rounded text-[10px] font-bold border transition-all ${
+                                    isMuted 
+                                      ? 'bg-rose-500/20 text-rose-300 border-rose-500/40 hover:bg-rose-500/30' 
+                                      : 'bg-zinc-800 text-zinc-300 border-zinc-700 hover:bg-zinc-750'
+                                  }`}
+                                  title={isMuted ? "Unmute user in chat" : "Mute user in chat"}
+                                >
+                                  {isMuted ? '🔊 Unmute Chat' : '🔇 Mute Chat'}
+                                </button>
+                                <button
+                                  onClick={() => kickUser(u.socketId)}
+                                  className="col-span-2 py-1.5 rounded text-[10px] font-bold bg-rose-950/40 hover:bg-rose-900/60 border border-rose-500/30 text-rose-300 transition-all"
+                                  title="Kick user from room"
+                                >
+                                  👞 Kick Collaborator
+                                </button>
+                              </div>
+                            )}
+
+                            {!isOwner && (
+                              <div className="flex flex-wrap gap-1.5">
+                                {isBlocked && (
+                                  <span className="text-[9px] bg-rose-500/10 text-rose-400 border border-rose-500/20 px-1.5 py-0.5 rounded font-medium">
+                                    Blocked Edit
+                                  </span>
+                                )}
+                                {isMuted && (
+                                  <span className="text-[9px] bg-rose-500/10 text-rose-400 border border-rose-500/20 px-1.5 py-0.5 rounded font-medium">
+                                    Muted Chat
+                                  </span>
+                                )}
+                                {!isBlocked && !isMuted && (
+                                  <span className="text-[9px] bg-emerald-500/10 text-emerald-400 border border-emerald-500/20 px-1.5 py-0.5 rounded font-medium">
+                                    Full Access
+                                  </span>
+                                )}
+                              </div>
+                            )}
+                          </div>
+                        );
+                      })
+                    )}
+                  </div>
+                </div>
+              )}
             </motion.div>
           )}
         </AnimatePresence>

@@ -9,8 +9,13 @@ let quillBinding = null;
 export const initYjs = (roomId, quillRef) => {
   ydoc = new Y.Doc();
   
+  const backendUrl = process.env.NEXT_PUBLIC_WS_URL || 'http://localhost:4000';
+  const wsProtocol = backendUrl.startsWith('https') ? 'wss' : 'ws';
+  const wsHost = backendUrl.replace(/^https?:\/\//, '');
+  const wsUrl = `${wsProtocol}://${wsHost}`;
+
   provider = new WebsocketProvider(
-    `ws://localhost:4000`,
+    wsUrl,
     roomId,
     ydoc
   );

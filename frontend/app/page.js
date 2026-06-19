@@ -42,12 +42,20 @@ function HomeContent() {
   }, [searchParams]);
 
   const createRoom = () => {
+    if (!username.trim()) {
+      alert("Please enter a nickname first.");
+      return;
+    }
     const id = 'room-' + Math.random().toString(36).substring(2, 11);
     setRoomId(id);
     setIsEditing(true);
   };
 
   const joinRoom = () => {
+    if (!username.trim()) {
+      alert("Please enter a nickname first.");
+      return;
+    }
     if (roomId.trim()) {
       setIsEditing(true);
     }

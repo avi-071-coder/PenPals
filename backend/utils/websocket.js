@@ -41,6 +41,8 @@ class WebSocketManager {
     this.roomChats = new Map();
     this.roomReadOnly = new Map();
     this.roomBlockedUsers = new Map(); // roomId -> Set of blocked socketIds
+    this.roomMutedChat = new Map(); // roomId -> Set of muted socketIds
+    this.roomChatLocked = new Map(); // roomId -> Boolean indicating if chat is locked globally
 
     this.setupPersistence();
     this.setupYjsWS();
@@ -134,6 +136,14 @@ class WebSocketManager {
         // Send current blocked users list
         const blockedSet = this.roomBlockedUsers.get(roomId) || new Set();
         socket.emit('blocked-users-list', Array.from(blockedSet));
+
+        // Send current muted chat list
+        const mutedChatSet = this.roomMutedChat.get(roomId) || new Set();
+        socket.emit('muted-chat-list', Array.from(mutedChatSet));
+
+        // Send current global chat lock state
+        const isChatLocked = this.roomChatLocked.get(roomId) || false;
+        socket.emit('chat-lock-state', isChatLocked);
         
         // Notify others
         socket.to(roomId).emit('user-joined', {
@@ -144,9 +154,109 @@ class WebSocketManager {
         });
       });
 
+      socket.on('request-join', (joinData) => {
+        const isObject = typeof joinData === 'object' && joinData !== null;
+        const roomId = isObject ? joinData.roomId : joinData;
+        const username = isObject ? joinData.username : null;
+        const color = isObject ? joinData.color : null;
+        
+        const finalUsername = username || getRandomUsername();
+        const finalColor = color || getRandomColor();
+        
+        socket.pendingRoomId = roomId;
+        socket.pendingUsername = finalUsername;
+        socket.pendingColor = finalColor;
+
+        if (!this.roomOwners.has(roomId)) {
+          // Room does not exist yet, they are the owner, auto-admit
+          socket.emit('join-approved', { roomId, username: finalUsername, color: finalColor });
+        } else {
+          // Room exists, notify the current owner to admit them
+          const ownerSocketId = this.roomOwners.get(roomId);
+          this.io.to(ownerSocketId).emit('join-request', {
+            socketId: socket.id,
+            userId: finalUsername,
+            color: finalColor
+          });
+        }
+      });
+
+      socket.on('admit-user', (targetSocketId) => {
+        const roomId = socket.roomId;
+        if (this.roomOwners.get(roomId) !== socket.id) return;
+        
+        const targetSocket = this.io.sockets.sockets.get(targetSocketId);
+        if (targetSocket && targetSocket.pendingRoomId === roomId) {
+          targetSocket.emit('join-approved', { 
+            roomId: targetSocket.pendingRoomId, 
+            username: targetSocket.pendingUsername, 
+            color: targetSocket.pendingColor 
+          });
+        }
+      });
+
+      socket.on('deny-user', (targetSocketId) => {
+        const roomId = socket.roomId;
+        if (this.roomOwners.get(roomId) !== socket.id) return;
+        
+        const targetSocket = this.io.sockets.sockets.get(targetSocketId);
+        if (targetSocket && targetSocket.pendingRoomId === roomId) {
+          targetSocket.emit('join-denied');
+        }
+      });
+
+      socket.on('kick-user', (targetSocketId) => {
+        const roomId = socket.roomId;
+        if (this.roomOwners.get(roomId) !== socket.id) return;
+        
+        const targetSocket = this.io.sockets.sockets.get(targetSocketId);
+        if (targetSocket) {
+          targetSocket.emit('kicked');
+          targetSocket.disconnect(true);
+        }
+      });
+
+      socket.on('toggle-chat-mute', ({ targetSocketId, muteStatus }) => {
+        const roomId = socket.roomId;
+        if (!roomId || this.roomOwners.get(roomId) !== socket.id) return;
+
+        if (!this.roomMutedChat.has(roomId)) {
+          this.roomMutedChat.set(roomId, new Set());
+        }
+        
+        const mutedSet = this.roomMutedChat.get(roomId);
+        if (muteStatus) {
+          mutedSet.add(targetSocketId);
+        } else {
+          mutedSet.delete(targetSocketId);
+        }
+
+        this.io.to(roomId).emit('muted-chat-list', Array.from(mutedSet));
+      });
+
+      socket.on('toggle-global-chat-lock', (chatLockedState) => {
+        const roomId = socket.roomId;
+        if (!roomId || this.roomOwners.get(roomId) !== socket.id) return;
+
+        this.roomChatLocked.set(roomId, chatLockedState);
+        this.io.to(roomId).emit('chat-lock-state', chatLockedState);
+      });
+
       socket.on('send-chat-message', (messageText) => {
         const roomId = socket.roomId;
         if (!roomId) return;
+
+        // Block if global chat lock is active and sender is not owner
+        const isOwner = this.roomOwners.get(roomId) === socket.id;
+        const isChatLocked = this.roomChatLocked.get(roomId) || false;
+        if (isChatLocked && !isOwner) {
+          return;
+        }
+
+        // Block if user is muted in chat
+        if (this.roomMutedChat.has(roomId) && this.roomMutedChat.get(roomId).has(socket.id)) {
+          return; 
+        }
 
         const chatMsg = {
           socketId: socket.id,
@@ -239,12 +349,23 @@ class WebSocketManager {
             }
           }
 
+          // Clean up muted user list if they left
+          if (this.roomMutedChat.has(roomId)) {
+            const mutedSet = this.roomMutedChat.get(roomId);
+            if (mutedSet.has(socket.id)) {
+              mutedSet.delete(socket.id);
+              this.io.to(roomId).emit('muted-chat-list', Array.from(mutedSet));
+            }
+          }
+
           if (this.roomUsers.get(roomId).size === 0) {
             this.roomUsers.delete(roomId);
             this.roomChats.delete(roomId);
             this.roomReadOnly.delete(roomId);
             this.roomOwners.delete(roomId);
             this.roomBlockedUsers.delete(roomId);
+            this.roomMutedChat.delete(roomId);
+            this.roomChatLocked.delete(roomId);
           } else {
             const usersInRoom = Array.from(this.roomUsers.get(roomId).values());
             this.io.to(roomId).emit('room-users', usersInRoom);
