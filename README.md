@@ -1,53 +1,86 @@
-# PenPals
+<div align="center">
+  <img src="./frontend/public/logo.png" alt="PenPals Logo" width="150" />
+  <h1>PenPals</h1>
+  <p><strong>A secure, real-time collaborative document editor for modern teams.</strong></p>
+</div>
 
-PenPals is a real-time collaborative rich-text and markdown editor. Multiple users can join edit rooms, see each other's live cursors, chat, save document snapshots/backups, import/export PDF files, customize themes, and manage collaborator permissions.
+<br />
+
+## What is PenPals?
+
+**PenPals** is a powerful, real-time collaborative rich-text and markdown editor. Built for modern teams, it enables multiple users to join secure edit rooms, see live cursors in real-time, communicate via integrated chat, and manage document lifecycles with local backups and cross-format exports. 
 
 ---
 
-## Key Features
+## The Problem It Counters
 
-- **Real-Time Collaboration**: Powered by Yjs, `y-websocket`, and Quill, enabling Conflict-free Replicated Data Types (CRDTs) with custom named live cursors.
-- **Collaborator Controls & Blocking**: 
-  - The creator of the room is assigned as the **Room Owner**.
-  - Owners can open the **Users Drawer** to globally lock editing, or **block/unblock individual collaborators** from editing.
-  - Blocked users immediately switch to a read-only state with warning banner notifications.
-  - Ownership is automatically passed to the next active user if the current owner leaves.
-- **Rich Text & Slash Commands**: Fast, native toolbar with custom text sizing and slash (`/`) shortcuts for bullet points, quote formatting, list numbers, and code blocks.
-- **Anytime Custom Resizer**: Simply click any inserted image inside the editor to dynamically resize it with corner handles or delete it immediately using the floating overlay.
-- **PDF File Import/Export**: 
-  - **Export PDF**: Save your structured document locally as a standard PDF file using `html2pdf.js`.
-  - **Import PDF**: Upload any local PDF file to reconstruct its text content inside the editor.
-- **Aesthetic Premium Themes**: Customize the design with themes like **Netflix Dark**, **Spotify Retro**, **Sunset Glow**, **Cyberpunk**, **Sleek Dark**, **Cozy Sepia**, and **Glassmorphism**.
-- **Collaborative Chat**: Integrated real-time room chat drawer.
-- **Version History & Backups**: Name and save snapshots of your document, and restore to past backups at any time.
+**The Problem:**
+Traditional document editors are either entirely offline (creating a nightmare for team collaboration and version control) or heavily tied to locked-down corporate ecosystems (like Google Docs or Office 365) which require account sign-ups, track user data, and limit custom aesthetic experiences.
+
+**The Solution:**
+PenPals provides instant, friction-free collaboration. No accounts required. Just create a room, share the ID, and start typing. It utilizes **Conflict-free Replicated Data Types (CRDTs)** via Yjs to guarantee that everyone's keystrokes are synchronized with zero conflicts, even on unstable network connections. It marries the speed of a local editor with the power of enterprise collaboration tools.
+
+---
+
+## Core Features
+
+### Real-Time Engine
+*   **Live Cursors:** See exactly where your team members are typing in real-time.
+*   **Integrated Chat:** A built-in sliding chat drawer to discuss changes without leaving the document.
+
+### Security & Access Control
+*   **Room Ownership:** The creator of a room is automatically assigned as the Room Owner.
+*   **Moderation:** Owners can instantly revoke editing privileges from specific disruptive users or lock the entire document.
+
+### Editing & Formatting
+*   **Rich Text & Slash Commands:** Fast, native toolbar with `/` shortcut commands for inserting code blocks, quotes, and lists.
+*   **Image Resizer:** Native, on-the-fly image resizing and deletion via intuitive corner drag-handles.
+*   **File Interoperability:** 
+    *   **Import:** Easily import Microsoft Word (`.doc`, `.docx`) and Google Docs files to continue editing.
+    *   **Export:** Unified export menu to instantly save your work as PDF, Word, or Google Docs natively to your device using modern File System Access APIs.
+*   **Version Backups:** Name and capture point-in-time snapshots of your document to restore later.
 
 ---
 
 ## Tech Stack
 
-- **Frontend**: Next.js (App Router), Framer Motion, React-Quill, Yjs, Socket.io-client.
-- **Backend**: Node.js, Express, Socket.io, `y-websocket` server, MongoDB / Mongoose (with in-memory fallbacks if no URI is supplied).
+**Frontend (Client)**
+*   **Framework:** Next.js 14 (App Router)
+*   **Styling:** Tailwind CSS & Vanilla CSS
+*   **Animations:** Framer Motion
+*   **Editor:** Quill / React-Quill
+*   **Real-time:** Socket.io-client, Yjs, y-quill
+
+**Backend (Server)**
+*   **Runtime:** Node.js
+*   **API/Server:** Express.js
+*   **WebSockets:** Socket.io, `y-websocket`
+*   **Database:** MongoDB Atlas (Mongoose) with LevelDB local fallback caching
+*   **Security:** Helmet, Express Rate Limit, Mongo Sanitize
 
 ---
 
-## Installation & Setup
+## Installation & Local Setup
 
-### 1. Start the Backend Server
-Navigate to the `backend` directory:
+### 1. Clone the Repository
+```bash
+git clone https://github.com/YOUR_USERNAME/YOUR_REPO_NAME.git
+cd PenPals
+```
+
+### 2. Start the Backend
+Navigate to the backend folder to install dependencies and start the WebSocket/API server.
 ```bash
 cd backend
 npm install
-npm start
+npm run dev
 ```
-*Note: The backend will run on port `4000`.*
 
-### 2. Start the Frontend Server
-Navigate to the `frontend` directory:
+### 3. Start the Frontend
+Open a new terminal window, navigate to the frontend folder, and boot up the Next.js application.
 ```bash
 cd frontend
 npm install
 npm run dev
 ```
-*Note: The frontend will run on port `3000`.*
 
-Open [http://localhost:3000](http://localhost:3000) in your browser to start using PenPals!

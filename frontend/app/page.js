@@ -78,10 +78,13 @@ function HomeContent() {
         transition={{ duration: 0.5, ease: 'easeOut' }}
         className="bg-zinc-900/60 backdrop-blur-2xl rounded-3xl p-8 md:p-10 border border-white/10 shadow-2xl max-w-xl w-full text-white z-10"
       >
-        <div className="text-center mb-8">
-          <h1 className="text-5xl font-black bg-gradient-to-r from-white via-indigo-200 to-zinc-400 bg-clip-text text-transparent mb-2 tracking-tight">
-            PenPals
-          </h1>
+        <div className="text-center mb-8 flex flex-col items-center">
+          <img 
+            src="/logo.png" 
+            alt="PenPals Logo" 
+            className="w-48 h-auto mb-6" 
+            style={{ filter: 'invert(1) hue-rotate(180deg) brightness(1.5)', mixBlendMode: 'screen' }}
+          />
           <p className="text-zinc-400 text-sm">Real-time collaborative markdown & rich text editor</p>
         </div>
 
@@ -148,7 +151,7 @@ function HomeContent() {
           </div>
 
           <div className="text-center text-zinc-500 text-xs">
-            ✨ Real-time updates • Version backups • Collaborative chat
+            Real-time updates • Version backups • Collaborative chat
           </div>
         </div>
       </motion.div>

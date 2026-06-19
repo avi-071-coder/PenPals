@@ -3,6 +3,9 @@ const express = require('express');
 const mongoose = require('mongoose');
 const cors = require('cors');
 const http = require('http');
+const helmet = require('helmet');
+const rateLimit = require('express-rate-limit');
+const mongoSanitize = require('express-mongo-sanitize');
 const WebSocketManager = require('./utils/websocket');
 
 const app = express();
@@ -15,6 +18,18 @@ app.use(cors({
   origin: process.env.FRONTEND_URL || "http://localhost:3000"
 }));
 app.use(express.json());
+
+// Security Middleware
+app.use(helmet());
+app.use(mongoSanitize());
+
+const apiLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000, // 15 minutes
+  max: 200, // Limit each IP to 200 requests per `window` (per 15 minutes)
+  standardHeaders: true,
+  legacyHeaders: false,
+});
+app.use('/api/', apiLimiter);
 
 // MongoDB connection - Only connect if MONGODB_URI env variable is provided
 const MONGODB_URI = process.env.MONGODB_URI;

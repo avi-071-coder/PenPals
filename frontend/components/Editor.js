@@ -207,6 +207,14 @@ const Editor = ({ roomId, initialUsername, initialColor, initialTheme, forcedRea
 
   const theme = getThemeStyles();
 
+  // Unified export handler
+  const handleExportOption = (e) => {
+    const opt = e.target.value;
+    if (opt === 'pdf') exportDocumentFile();
+    else if (opt === 'word' || opt === 'gdoc') exportDocumentWord();
+    e.target.value = '';
+  };
+
   // Export editor state locally as a PDF file
   const exportDocumentFile = async () => {
     const quill = quillRef.current?.getEditor();
@@ -225,72 +233,169 @@ const Editor = ({ roomId, initialUsername, initialColor, initialTheme, forcedRea
         jsPDF: { unit: 'in', format: 'letter', orientation: 'portrait' }
       };
 
-      window.html2pdf().from(element).set(opt).save().then(() => {
-        setSaveStatus('Saved');
+      const pdfWorker = window.html2pdf().from(element).set(opt);
+      
+      if (window.showSaveFilePicker) {
+        try {
+          // Native Save As Flow
+          const pdfBlob = await pdfWorker.output('blob');
+          const handle = await window.showSaveFilePicker({
+            suggestedName: `penpals-document-${roomId}.pdf`,
+            types: [{ description: 'PDF Document', accept: { 'application/pdf': ['.pdf'] } }],
+          });
+          const writable = await handle.createWritable();
+          await writable.write(pdfBlob);
+          await writable.close();
+          toast.success('PDF document saved successfully!');
+        } catch (err) {
+          if (err.name !== 'AbortError') throw err;
+        }
+      } else {
+        // Fallback for browsers that don't support File System Access API
+        await pdfWorker.save();
         toast.success('PDF document exported successfully!');
-      }).catch(err => {
-        console.error(err);
-        setSaveStatus('Saved');
-        toast.error('Failed to export PDF.');
-      });
+      }
     } catch (err) {
       console.error(err);
+      toast.error('Failed to export PDF.');
+    } finally {
       setSaveStatus('Saved');
-      toast.error('Could not load PDF library.');
     }
   };
 
-  // Import local PDF file and convert text content back into editor
+  // Export editor state locally as a Word file
+  const exportDocumentWord = async () => {
+    const quill = quillRef.current?.getEditor();
+    if (!quill) return;
+
+    setSaveStatus('Exporting Word...');
+    try {
+      const htmlContent = `
+        <html xmlns:o='urn:schemas-microsoft-com:office:office' xmlns:w='urn:schemas-microsoft-com:office:word' xmlns='http://www.w3.org/TR/REC-html40'>
+        <head><meta charset='utf-8'><title>Export</title></head>
+        <body>${quill.root.innerHTML}</body>
+        </html>
+      `;
+      const blob = new Blob(['\ufeff', htmlContent], { type: 'application/msword' });
+
+      if (window.showSaveFilePicker) {
+        try {
+          const handle = await window.showSaveFilePicker({
+            suggestedName: `penpals-document-${roomId}.doc`,
+            types: [{ description: 'Word Document', accept: { 'application/msword': ['.doc', '.docx'] } }],
+          });
+          const writable = await handle.createWritable();
+          await writable.write(blob);
+          await writable.close();
+          toast.success('Word document saved successfully!');
+        } catch (err) {
+          if (err.name !== 'AbortError') throw err;
+        }
+      } else {
+        // Fallback standard download
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = `penpals-document-${roomId}.doc`;
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+        URL.revokeObjectURL(url);
+        toast.success('Word document exported successfully!');
+      }
+    } catch (err) {
+      console.error(err);
+      toast.error('Failed to export Word document.');
+    } finally {
+      setSaveStatus('Saved');
+    }
+  };
+
+  // Import local PDF/Word file and convert text content back into editor
   const importDocumentFile = async (e) => {
     const file = e.target.files[0];
     if (!file) return;
 
-    setSaveStatus('Importing PDF...');
-    try {
-      await loadScript('https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.4.120/pdf.min.js');
-      window.pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.4.120/pdf.worker.min.js';
+    setSaveStatus('Importing Document...');
+    const ext = file.name.split('.').pop().toLowerCase();
 
-      const reader = new FileReader();
-      reader.onload = async (event) => {
-        try {
-          const typedarray = new Uint8Array(event.target.result);
-          const pdf = await window.pdfjsLib.getDocument(typedarray).promise;
-          
-          let fullText = '';
-          for (let i = 1; i <= pdf.numPages; i++) {
-            const page = await pdf.getPage(i);
-            const textContent = await page.getTextContent();
+    if (ext === 'pdf') {
+      try {
+        await loadScript('https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.4.120/pdf.min.js');
+        window.pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.4.120/pdf.worker.min.js';
+
+        const reader = new FileReader();
+        reader.onload = async (event) => {
+          try {
+            const typedarray = new Uint8Array(event.target.result);
+            const pdf = await window.pdfjsLib.getDocument(typedarray).promise;
             
-            let lastY = null;
-            let pageText = '';
-            for (const item of textContent.items) {
-              if (lastY !== null && Math.abs(item.transform[5] - lastY) > 5) {
-                pageText += '\n';
+            let fullText = '';
+            for (let i = 1; i <= pdf.numPages; i++) {
+              const page = await pdf.getPage(i);
+              const textContent = await page.getTextContent();
+              
+              let lastY = null;
+              let pageText = '';
+              for (const item of textContent.items) {
+                if (lastY !== null && Math.abs(item.transform[5] - lastY) > 5) {
+                  pageText += '\n';
+                }
+                pageText += item.str + ' ';
+                lastY = item.transform[5];
               }
-              pageText += item.str + ' ';
-              lastY = item.transform[5];
+              fullText += pageText + '\n\n';
             }
-            fullText += pageText + '\n\n';
-          }
 
-          const quill = quillRef.current?.getEditor();
-          if (quill) {
-            quill.setText(fullText.trim());
+            const quill = quillRef.current?.getEditor();
+            if (quill) {
+              quill.setText(fullText.trim());
+              toast.success('PDF imported and text reconstructed!');
+            }
+          } catch (err) {
+            console.error(err);
+            toast.error('Failed to parse PDF contents.');
+          } finally {
             setSaveStatus('Saved');
-            toast.success('PDF imported and text reconstructed!');
           }
-        } catch (err) {
-          console.error(err);
-          setSaveStatus('Saved');
-          toast.error('Failed to parse PDF contents.');
-        }
-      };
-      reader.readAsArrayBuffer(file);
-    } catch (err) {
-      console.error(err);
+        };
+        reader.readAsArrayBuffer(file);
+      } catch (err) {
+        console.error(err);
+        setSaveStatus('Saved');
+        toast.error('Could not load PDF importer.');
+      }
+    } else if (ext === 'doc' || ext === 'docx') {
+      try {
+        await loadScript('https://cdnjs.cloudflare.com/ajax/libs/mammoth/1.4.21/mammoth.browser.min.js');
+        const reader = new FileReader();
+        reader.onload = async (event) => {
+          const arrayBuffer = event.target.result;
+          try {
+            const result = await window.mammoth.extractRawText({ arrayBuffer });
+            const quill = quillRef.current?.getEditor();
+            if (quill) {
+              quill.setText(result.value.trim());
+              toast.success('Word document imported!');
+            }
+          } catch(err) {
+            console.error(err);
+            toast.error('Failed to parse Word document.');
+          } finally {
+            setSaveStatus('Saved');
+          }
+        };
+        reader.readAsArrayBuffer(file);
+      } catch (err) {
+        console.error(err);
+        setSaveStatus('Saved');
+        toast.error('Could not load Word importer.');
+      }
+    } else {
+      toast.error('File format not supported.');
       setSaveStatus('Saved');
-      toast.error('Could not load PDF importer.');
     }
+    
     e.target.value = '';
   };
 
@@ -690,9 +795,7 @@ const Editor = ({ roomId, initialUsername, initialColor, initialTheme, forcedRea
 
     socketRef.current.on('owner-status', (status) => {
       setIsOwner(status);
-      if (status) {
-        toast('👑 You are the owner of this room!');
-      }
+      // Suppress owner toast alert
     });
 
     socketRef.current.on('user-joined', (user) => {
@@ -838,6 +941,17 @@ const Editor = ({ roomId, initialUsername, initialColor, initialTheme, forcedRea
       }
     };
   }, [roomId, initialUsername, initialColor, forcedReadOnly, chatOpen, triggerSaveStatus, updateFormattingInspector, handleCursorMove, applyCommand, closeSlashMenu, fetchVersions]);
+
+  // Handle beforeunload to warn users about leaving
+  useEffect(() => {
+    const handleBeforeUnload = (e) => {
+      e.preventDefault();
+      e.returnValue = 'You have unsaved changes. Are you sure you want to leave?';
+      return e.returnValue;
+    };
+    window.addEventListener('beforeunload', handleBeforeUnload);
+    return () => window.removeEventListener('beforeunload', handleBeforeUnload);
+  }, []);
 
   // Handle auto-scroll for chat
   useEffect(() => {
@@ -1049,9 +1163,12 @@ const Editor = ({ roomId, initialUsername, initialColor, initialTheme, forcedRea
       <div className={`p-4 border-b transition-all duration-300 ${theme.header}`}>
         <div className="max-w-7xl mx-auto flex justify-between items-center flex-wrap gap-4">
           <div className="flex items-center gap-3">
-            <h1 className="text-2xl font-black tracking-tight bg-gradient-to-r from-white via-gray-100 to-gray-400 bg-clip-text text-transparent">
-              PenPals
-            </h1>
+            <img 
+              src="/logo.png" 
+              alt="PenPals Logo" 
+              className="w-16 h-auto object-contain" 
+              style={{ filter: 'invert(1) hue-rotate(180deg) brightness(1.5)', mixBlendMode: 'screen' }}
+            />
             
             {/* Copy Room ID Button */}
             <div className="flex items-center gap-1.5 bg-black/45 border border-white/15 px-2.5 py-1 rounded-md text-xs">
@@ -1078,7 +1195,7 @@ const Editor = ({ roomId, initialUsername, initialColor, initialTheme, forcedRea
               className="px-2.5 py-1 bg-indigo-600/35 hover:bg-indigo-600 border border-indigo-500/40 hover:border-indigo-400 rounded-md text-xs font-bold transition-all text-white flex items-center gap-1 active:scale-95"
               title="Save a snapshot of this document (Ctrl + S)"
             >
-              💾 Save
+              💾
             </button>
           </div>
 
@@ -1100,19 +1217,23 @@ const Editor = ({ roomId, initialUsername, initialColor, initialTheme, forcedRea
           </div>
 
           <div className="flex items-center gap-2.5 flex-wrap">
-            {/* Export and Import PDF Documents */}
-            <button
-              onClick={exportDocumentFile}
-              className={`px-3 py-1.5 rounded-lg text-xs font-bold flex items-center gap-1 transition-all ${theme.buttonSecondary}`}
-              title="Save document as PDF file"
+            {/* Unified Export Menu */}
+            <select
+              onChange={handleExportOption}
+              className={`px-3 py-1.5 rounded-lg text-xs font-bold transition-all cursor-pointer ${theme.buttonSecondary}`}
+              title="Export Document"
+              defaultValue=""
             >
-              📄 Export PDF
-            </button>
+              <option value="" disabled hidden>📤 Export</option>
+              <option value="pdf" className="text-black">PDF (.pdf)</option>
+              <option value="word" className="text-black">Word (.doc)</option>
+              <option value="gdoc" className="text-black">Google Docs (.docx)</option>
+            </select>
 
             <div className="relative">
               <input
                 type="file"
-                accept=".pdf"
+                accept=".pdf,.doc,.docx"
                 onChange={importDocumentFile}
                 className="hidden"
                 id="document-file-import"
@@ -1120,9 +1241,9 @@ const Editor = ({ roomId, initialUsername, initialColor, initialTheme, forcedRea
               <label
                 htmlFor="document-file-import"
                 className={`px-3 py-1.5 rounded-lg text-xs font-bold flex items-center gap-1 transition-all cursor-pointer ${theme.buttonSecondary}`}
-                title="Upload PDF to extract text content"
+                title="Import"
               >
-                📥 Import PDF
+                📥
               </label>
             </div>
 
@@ -1131,8 +1252,9 @@ const Editor = ({ roomId, initialUsername, initialColor, initialTheme, forcedRea
             <button
               onClick={() => { setChatOpen(prev => !prev); setHistoryOpen(false); setCollaboratorsOpen(false); }}
               className={`px-3 py-1.5 rounded-lg text-xs font-semibold relative ${theme.buttonSecondary}`}
+              title="Room Chat"
             >
-              💬 Chat
+              💬
               {chatMessages.length > 0 && (
                 <span className="absolute -top-1 -right-1 w-2 h-2 bg-rose-500 rounded-full" />
               )}
@@ -1141,15 +1263,17 @@ const Editor = ({ roomId, initialUsername, initialColor, initialTheme, forcedRea
             <button
               onClick={() => { setHistoryOpen(prev => !prev); setChatOpen(false); setCollaboratorsOpen(false); }}
               className={`px-3 py-1.5 rounded-lg text-xs font-semibold ${theme.buttonSecondary}`}
+              title="Version History"
             >
-              ⏳ History
+              ⏳
             </button>
 
             <button
               onClick={() => { setCollaboratorsOpen(prev => !prev); setChatOpen(false); setHistoryOpen(false); }}
               className={`px-3 py-1.5 rounded-lg text-xs font-semibold ${theme.buttonSecondary}`}
+              title="Room Users"
             >
-              👥 Users ({users.length})
+              👥 ({users.length})
             </button>
           </div>
         </div>
@@ -1182,7 +1306,7 @@ const Editor = ({ roomId, initialUsername, initialColor, initialTheme, forcedRea
 
             {/* Formatting Inspector Status Bar */}
             <div className="p-2 border-t border-white/5 flex items-center justify-between text-xs opacity-75 select-none">
-              <div>Room: {roomId} {isOwner ? '👑 (Owner)' : ''}</div>
+              <div>Room: {roomId} {isOwner ? '(Owner)' : ''}</div>
               <div className="flex items-center gap-1.5">
                 <span className="opacity-50">Formats:</span>
                 {activeFormats.length > 0 ? (
